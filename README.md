@@ -11,10 +11,13 @@
 ## 功能
 
 - **悬停展开**:鼠标移到刘海区域,面板自动下拉展开;移开自动收起
-- **点击启动**:点击图标启动应用;已运行则激活置前;运行中的应用带小圆点标识
+- **点击启动**:点击图标启动应用;已运行则激活置前
+- **运行中前置**:正在运行的应用自动排到最前,图标全彩并带小圆点;未运行的淡化靠后
+- **多行网格**:每行最多 6 个图标,超出自动折行,面板向下加长
 - **拖入添加**:从 Finder/Dock 拖 `.app` 到刘海,面板展开后松手即添加(自动读取名称/bundleID,重复条目自动跳过)
 - **拖出删除**:把面板里的图标拖出面板区域(越界超过 24pt)松手即删除;小幅误拖会自动回弹不删
 - **右键菜单**:面板空白处右键 → 添加应用…(NSOpenPanel 多选)/ 编辑配置文件 / 重新加载 / 退出
+- **开机自启**:安装到 `/Applications` 或 `~/Applications` 后,首次启动自动注册登录项(可在系统设置中关闭)
 
 ## 要求
 
@@ -24,7 +27,7 @@
 
 不想自己编译:到 [Releases](https://github.com/BiBoyang/NotchLauncher/releases/latest) 下载 zip,解压得到 `NotchLauncher.app`,拖入 `/Applications` 或 `~/Applications` 直接打开。
 
-应用已用 Developer ID 签名并通过 Apple 公证,Gatekeeper 直接放行。建议加入登录项(系统设置 → 通用 → 登录项)。
+应用已用 Developer ID 签名并通过 Apple 公证,Gatekeeper 直接放行。首次启动自动注册登录项,可在 系统设置 → 通用 → 登录项与扩展 中关闭。
 
 ## 配置
 
@@ -64,9 +67,12 @@ swift scripts/smoke-warp.swift
 
 A macOS launcher that lives in the notch — hover the notch to reveal a panel, click an icon to launch or activate the app.
 
+- Running apps sort first, full-color with a dot; idle apps dim to the back
+- Grid layout: up to 6 icons per row, wraps to more rows as you add apps
 - Add apps: drag a `.app` onto the notch, the panel expands, drop to add (name/bundleID detected automatically, duplicates skipped)
 - Remove apps: drag an icon out of the panel (more than 24pt past the edge) and release; small drags bounce back harmlessly
 - Right-click the panel for a menu: add apps via file picker, edit config, reload, quit
+- Auto-registers as a login item when installed under `/Applications` or `~/Applications` (toggle in System Settings)
 - Config lives at `~/Library/Application Support/NotchLauncher/apps.json` and is written back by UI operations
 - Requires macOS 13+ and a MacBook with a notch
 - Download the signed & notarized build from [Releases](https://github.com/BiBoyang/NotchLauncher/releases/latest), or build it yourself with `swift build` / `./scripts/build-app.sh`
