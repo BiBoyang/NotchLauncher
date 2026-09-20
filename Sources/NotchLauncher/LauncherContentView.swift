@@ -69,6 +69,11 @@ final class AppCellView: NSView {
             alphaValue = 0.35
             toolTip = "未安装或无法解析"
         } else {
+            // 已安装但未运行:图标与名字淡化;运行中维持全彩图标 + 白色名字
+            if !app.isRunning {
+                imageView.alphaValue = 0.6
+                label.textColor = NSColor.white.withAlphaComponent(0.55)
+            }
             toolTip = app.name
         }
 
@@ -257,41 +262,56 @@ final class LauncherContentView: NSView {
     @objc private func menuQuit() { actionHandler?(.quit) }
     @objc private func openConfigClicked() { actionHandler?(.openConfig) }
 
+    /// 每行最多 6 个 cell,超出折行;行数 = ceil(n / 6),面板向下加长。
+    private static let maxCellsPerRow = 6
+
     func reloadApps(notchHeight: CGFloat) {
         self.notchHeight = notchHeight
         stack?.removeFromSuperview()
 
-        let newStack = NSStackView()
-        newStack.orientation = .horizontal
-        newStack.spacing = 10
-        newStack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(newStack)
+        let grid = NSStackView()
+        grid.orientation = .vertical
+        grid.alignment = .centerX
+        grid.spacing = 10
+        grid.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(grid)
         NSLayoutConstraint.activate([
-            newStack.centerXAnchor.constraint(equalTo: centerXAnchor),
-            newStack.topAnchor.constraint(equalTo: topAnchor, constant: notchHeight + 12),
+            grid.centerXAnchor.constraint(equalTo: centerXAnchor),
+            grid.topAnchor.constraint(equalTo: topAnchor, constant: notchHeight + 12),
         ])
 
+        var cells: [NSView] = []
         switch AppConfig.load() {
         case .success(let entries) where !entries.isEmpty:
-            for entry in entries {
-                let app = AppConfig.resolve(entry)
-                newStack.addArrangedSubview(AppCellView(app: app, identity: entry.identity) { [weak self] action in
+            // 稳定分区:运行中整组在前,组内保持配置文件原始相对顺序;必须在切块分行之前完成
+            let resolved = entries.map { (entry: $0, app: AppConfig.resolve($0)) }
+            let ordered = resolved.filter { $0.app.isRunning } + resolved.filter { !$0.app.isRunning }
+            for item in ordered {
+                cells.append(AppCellView(app: item.app, identity: item.entry.identity) { [weak self] action in
                     self?.actionHandler?(action)
                 })
             }
         case .success:
-            newStack.addArrangedSubview(makeMessageCell(
+            cells.append(makeMessageCell(
                 title: "还没有添加应用",
                 buttonTitle: "打开配置文件"
             ))
         case .failure(let error):
-            newStack.addArrangedSubview(makeMessageCell(
+            cells.append(makeMessageCell(
                 title: "配置文件格式错误:\(error.localizedDescription)",
                 buttonTitle: "打开配置文件"
             ))
         }
 
-        stack = newStack
+        // 空态/错误态只有 1 个条目,自然退化为单行单格
+        for start in stride(from: 0, to: cells.count, by: Self.maxCellsPerRow) {
+            let end = min(start + Self.maxCellsPerRow, cells.count)
+            let row = NSStackView(views: Array(cells[start..<end]))
+            row.spacing = 10
+            grid.addArrangedSubview(row)
+        }
+
+        stack = grid
     }
 
     func desiredPanelSize(minimumWidth: CGFloat) -> CGSize {
