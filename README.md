@@ -18,15 +18,9 @@ A macOS launcher that lives in the notch — hover to reveal, click to launch.
 
 ## 下载
 
-不想自己编译:到 [Releases](https://github.com/BiBoyang/NotchLauncher/releases/latest) 下载 zip,解压得到 `NotchLauncher.app`,拖入 `/Applications` 或 `~/Applications`。
+不想自己编译:到 [Releases](https://github.com/BiBoyang/NotchLauncher/releases/latest) 下载 zip,解压得到 `NotchLauncher.app`,拖入 `/Applications` 或 `~/Applications` 直接打开。
 
-应用为 ad-hoc 签名、未经 Apple 公证,首次打开如提示"已损坏/无法验证开发者",在终端执行:
-
-```bash
-xattr -cr /Applications/NotchLauncher.app
-```
-
-然后正常打开。建议加入登录项(系统设置 → 通用 → 登录项)。
+应用已用 Developer ID 签名并通过 Apple 公证,Gatekeeper 直接放行。建议加入登录项(系统设置 → 通用 → 登录项)。
 
 ## 构建与安装
 
