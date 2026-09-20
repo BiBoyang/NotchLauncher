@@ -1,8 +1,12 @@
 # NotchLauncher
 
-A macOS launcher that lives in the notch — hover to reveal, click to launch.
+[![Release](https://img.shields.io/github/v/release/BiBoyang/NotchLauncher)](https://github.com/BiBoyang/NotchLauncher/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+![Platform](https://img.shields.io/badge/platform-macOS%2013%2B%20%E5%B8%A6%E5%88%98%E6%B5%B7%E7%9A%84%20MacBook-black)
 
 把 MacBook 刘海变成一个应用启动面板:鼠标悬停刘海展开面板,点击图标启动/激活应用。纯 AppKit + SPM,无第三方依赖。
+
+![NotchLauncher 面板截图](docs/screenshot.png)
 
 ## 功能
 
@@ -22,16 +26,6 @@ A macOS launcher that lives in the notch — hover to reveal, click to launch.
 
 应用已用 Developer ID 签名并通过 Apple 公证,Gatekeeper 直接放行。建议加入登录项(系统设置 → 通用 → 登录项)。
 
-## 构建与安装
-
-```bash
-swift build                # 调试构建
-./scripts/build-app.sh     # release 构建并打包到 build/NotchLauncher.app
-open build/NotchLauncher.app
-```
-
-建议把 `build/NotchLauncher.app` 拷到 `~/Applications` 后运行,并加入登录项。
-
 ## 配置
 
 配置文件:`~/Library/Application Support/NotchLauncher/apps.json`(首次运行自动创建)。
@@ -48,6 +42,14 @@ UI 操作(拖入/拖出/右键添加)会自动写回该文件;也可以右键 �
 
 条目身份:bundleID 优先,无 bundleID 用 path。改完右键 →「重新加载」生效。
 
+## 构建与安装
+
+```bash
+swift build                # 调试构建
+./scripts/build-app.sh     # release 构建并打包到 build/NotchLauncher.app
+open build/NotchLauncher.app
+```
+
 ## 冒烟测试
 
 应用运行中执行:
@@ -57,6 +59,17 @@ swift scripts/smoke-warp.swift
 ```
 
 脚本把鼠标 warp 到刘海再移回,观察 stderr 日志出现 `open` / `closed` 即正常。
+
+## English
+
+A macOS launcher that lives in the notch — hover the notch to reveal a panel, click an icon to launch or activate the app.
+
+- Add apps: drag a `.app` onto the notch, the panel expands, drop to add (name/bundleID detected automatically, duplicates skipped)
+- Remove apps: drag an icon out of the panel (more than 24pt past the edge) and release; small drags bounce back harmlessly
+- Right-click the panel for a menu: add apps via file picker, edit config, reload, quit
+- Config lives at `~/Library/Application Support/NotchLauncher/apps.json` and is written back by UI operations
+- Requires macOS 13+ and a MacBook with a notch
+- Download the signed & notarized build from [Releases](https://github.com/BiBoyang/NotchLauncher/releases/latest), or build it yourself with `swift build` / `./scripts/build-app.sh`
 
 ## License
 
