@@ -6,7 +6,7 @@
 
 把 MacBook 刘海变成一个应用启动面板:鼠标悬停刘海展开面板,点击图标启动/激活应用。纯 AppKit + SPM,无第三方依赖。
 
-![NotchLauncher 面板截图](docs/screenshot.png)
+![NotchLauncher 演示:悬停刘海展开面板,移开自动收起](docs/demo.gif)
 
 ## 功能
 
