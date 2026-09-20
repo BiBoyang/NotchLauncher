@@ -157,7 +157,8 @@ final class AppCellView: NSView {
         activeDragSource = source
 
         let session = beginDraggingSession(with: [dragItem], event: event, source: source)
-        session.animatesToStartingPositionsOnCancelOrFail = true
+        // 拖出删除:松手失败时禁止幽灵图标飞回原位,否则出现"飞回再消失"的诡异动画
+        session.animatesToStartingPositionsOnCancelOrFail = false
     }
 }
 
