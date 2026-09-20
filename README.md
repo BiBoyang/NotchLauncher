@@ -55,7 +55,15 @@ open build/NotchLauncher.app
 
 ## 冒烟测试
 
-应用运行中执行:
+无人值守几何回归(运行时鼠标会被 warp 几秒,期间请勿触碰;结束时自动恢复配置并重启日常实例):
+
+```bash
+scripts/smoke.sh
+```
+
+一条命令完成:构建 debug 版 → 用 1-app / 7-app 夹具替换 `apps.json` → warp 触发面板展开 → 从系统窗口服务器(CGWindowList)读面板真实 bounds 断言(1 app 325×152、7 app 590×254、相对刘海居中、窗口 layer 33)→ 恢复配置并重启日常实例。全 PASS exit 0,任一 FAIL exit 1。几何断言不需要辅助功能/屏幕录制权限。
+
+手动观察开合行为(应用运行中):
 
 ```bash
 swift scripts/smoke-warp.swift
