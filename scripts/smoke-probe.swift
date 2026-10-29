@@ -8,11 +8,10 @@ import Cocoa
 _ = NSApplication.shared
 
 let args = CommandLine.arguments
-let clampedHeight = args.count == 5 && args[4] == "clamped"
 guard args.count == 5,
     let pid = Int(args[1]),
     let expectedW = Double(args[3]),
-    clampedHeight || Double(args[4]) != nil
+    let expectedH = Double(args[4])
 else {
     print("usage: smoke-probe.swift <pid> <label> <expectedWidth> <expectedHeight>")
     exit(2)
@@ -22,7 +21,8 @@ let label = args[2]
 // ---------- 几何基线(规格常量,独立于实现,勿从源码反推) ----------
 // cell 84×92、行距 10、面板 padding:水平 36 / 顶部 notchHeight+12 / 底部 16、刘海 185×32 居中于屏顶。
 // 1 app:宽 = max(84+36, 185+140) = 325;高 = 32+12+92+16 = 152
-// 7 app:每行最多 6 个,折 2 行;宽 = 6×84+5×10+36 = 590;高 = 32+12+(92+10+92)+16 = 254
+// 显式 6 列的 7 app:宽 = 6×84+5×10+36 = 590;高 = 32+12+(92+10+92)+16 = 254
+// 默认 8 列:宽 = 8×84+7×10+36 = 778;所有布局最多显示 2 行
 // 期望宽高由 smoke.sh 传入;此处固定层级与容差:
 let expectedLayer = 33 // NSWindow.Level.statusBar(25) + 8
 let tolerance = 2.0 // 断言容差 ±2pt
@@ -44,9 +44,6 @@ else {
     exit(1)
 }
 let notchCenterX = screen.frame.origin.x + (left.maxX + right.minX) / 2
-let expectedH = clampedHeight
-    ? max(160, screen.frame.maxY - screen.visibleFrame.minY - 16)
-    : Double(args[4])!
 // CG 全局坐标原点在主屏左上,Y 轴与 Cocoa 相反
 let primaryHeight = NSScreen.screens[0].frame.maxY
 let warpTarget = CGPoint(x: notchCenterX, y: primaryHeight - (screen.frame.maxY - 5))

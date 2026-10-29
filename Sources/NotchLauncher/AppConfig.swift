@@ -23,7 +23,8 @@ struct LauncherSettings: Codable, Equatable {
 
     static let defaultOpenDelay: TimeInterval = 0.15
     static let defaultCloseDelay: TimeInterval = 0.35
-    static let defaultIconsPerRow = 6
+    static let defaultIconsPerRow = 8
+    static let maxVisibleRows = 2
 
     static let delayRange: ClosedRange<Double> = 0...2
     static let iconsPerRowRange: ClosedRange<Int> = 3...10
@@ -84,6 +85,13 @@ struct AppConfigFile: Codable {
     }
 }
 
+enum AppConfigWriteResult: Equatable {
+    case written
+    case noChange
+    case limitReached
+    case failed
+}
+
 struct ResolvedApp {
     let name: String
     let url: URL?
@@ -100,6 +108,7 @@ enum LauncherAction {
     case dragBegan
     case dragEnded
     case appsChanged
+    case appLimitReached
     case removeRequest(identity: String, dropPoint: NSPoint)
     case addApps
     case openSettings
@@ -116,6 +125,8 @@ extension Notification.Name {
 }
 
 enum AppConfig {
+    static let visibleAppLimit = 16
+
     /// 测试接缝:非 nil 时配置目录改指此处(仅数据层断言脚本使用)。
     static var directoryOverride: URL?
 
@@ -168,13 +179,23 @@ enum AppConfig {
         return AppEntry(name: name, bundleID: bundle.bundleIdentifier, path: url.path)
     }
 
-    /// 添加条目;已在列表中(按 identity 去重)则跳过,不报错。
+    /// 添加条目;重复跳过,可见条目达到上限时拒绝。旧配置已有超额条目仍原样保留。
     @discardableResult
     static func add(_ entry: AppEntry) -> Bool {
-        update { file in
-            guard !file.apps.contains(where: { $0.identity == entry.identity }) else { return false }
+        addWithResult(entry) == .written
+    }
+
+    @discardableResult
+    static func addWithResult(_ entry: AppEntry) -> AppConfigWriteResult {
+        switch loadConfig() {
+        case .failure(let error):
+            nlLog("配置读取失败,放弃添加:\(error.localizedDescription)")
+            return .failed
+        case .success(var file):
+            guard !file.apps.contains(where: { $0.identity == entry.identity }) else { return .noChange }
+            guard visibleAppCount(in: file) < visibleAppLimit || entry.hidden == true else { return .limitReached }
             file.apps.append(entry)
-            return true
+            return save(file) ? .written : .failed
         }
     }
 
@@ -220,11 +241,27 @@ enum AppConfig {
 
     @discardableResult
     static func setHidden(identity: String, hidden: Bool) -> Bool {
-        update { file in
+        setHiddenWithResult(identity: identity, hidden: hidden) == .written
+    }
+
+    @discardableResult
+    static func setHiddenWithResult(identity: String, hidden: Bool) -> AppConfigWriteResult {
+        switch loadConfig() {
+        case .failure(let error):
+            nlLog("配置读取失败,放弃修改可见性:\(error.localizedDescription)")
+            return .failed
+        case .success(var file):
             guard let index = file.apps.firstIndex(where: { $0.identity == identity }),
-                  (file.apps[index].hidden ?? false) != hidden else { return false }
+                  (file.apps[index].hidden ?? false) != hidden else { return .noChange }
+            if !hidden, visibleAppCount(in: file) >= visibleAppLimit { return .limitReached }
             file.apps[index].hidden = hidden
-            return true
+            return save(file) ? .written : .failed
+        }
+    }
+
+    private static func visibleAppCount(in file: AppConfigFile) -> Int {
+        file.apps.reduce(into: 0) { count, entry in
+            if entry.hidden != true { count += 1 }
         }
     }
 

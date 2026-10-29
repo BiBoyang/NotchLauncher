@@ -301,12 +301,18 @@ final class LauncherContentView: NSView {
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
         var added = false
+        var limitReached = false
         for url in draggedAppURLs(sender) where Self.isReadableAppBundle(url) {
             if let entry = AppConfig.entry(forAppAt: url) {
-                added = AppConfig.add(entry) || added
+                switch AppConfig.addWithResult(entry) {
+                case .written: added = true
+                case .limitReached: limitReached = true
+                case .noChange, .failed: break
+                }
             }
         }
         if added { actionHandler?(.appsChanged) }
+        if limitReached { actionHandler?(.appLimitReached) }
         return added
     }
 

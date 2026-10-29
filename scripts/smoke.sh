@@ -2,7 +2,7 @@
 # NotchLauncher 几何回归冒烟测试
 #
 # 一条命令完成:构建 debug 版 → 1-app 夹具断言面板 325×152 → 7-app 夹具断言 590×254
-# → 7-app + iconsPerRow=3 夹具断言 325×356 → 100-app 断言窗口高度被可用区域钳制
+# → 7-app + iconsPerRow=3 夹具断言两行高度 325×254 → 100-app 默认 8 列并限制两行
 # → 恢复 apps.json → 重启日常安装态实例。
 # 全 PASS exit 0,任一 FAIL exit 1。
 #
@@ -12,7 +12,8 @@
 # 几何基线(规格常量,独立于实现):
 #   cell 84×92、行距 10、padding 水平 36 / 顶 notchHeight+12 / 底 16、刘海 185×32
 #   1 app:325×152;7 app(6 列折 2 行):590×254;
-#   7 app + 每行 3 个(折 3 行):宽 max(3×84+2×10+36, 325)=325,高 32+12+(3×92+2×10)+16=356
+#   所有场景最多显示 2 行:内容高 2×92+10=194,面板高 32+12+194+16=254
+#   默认 8 列:宽 8×84+7×10+36=778;显式 6 列仍为 590
 #   窗口 layer = statusBar(25)+8 = 33
 
 set -u
@@ -33,7 +34,7 @@ FIXTURE_7='{"apps":[
 {"name":"照片","bundleID":"com.apple.Photos"},
 {"name":"信息","bundleID":"com.apple.MobileSMS"},
 {"name":"FaceTime","bundleID":"com.apple.FaceTime"}
-]}'
+],"settings":{"iconsPerRow":6}}'
 
 # 同上 7 个 app,但每行 3 个:验证 settings.iconsPerRow 生效
 FIXTURE_7_3ROWS='{"apps":[
@@ -153,22 +154,22 @@ else
     FAIL=1
 fi
 
-# ---------- 5b. 场景三:7 app + iconsPerRow=3 → 325×356 ----------
+# ---------- 5b. 场景三:7 app + iconsPerRow=3 → 最多两行 325×254 ----------
 printf '%s' "$FIXTURE_7_3ROWS" > "$APPS_JSON"
 note "apps.json 已替换为 7-app/每行3个 夹具"
-note "场景 3/4:iconsPerRow=3,断言面板 325×356(鼠标将被 warp,勿动)…"
-if swift "$ROOT/scripts/smoke-probe.swift" "$DEBUG_PID" "7-app-3rows" 325 356; then
+note "场景 3/4:iconsPerRow=3,最多两行,断言面板 325×254(鼠标将被 warp,勿动)…"
+if swift "$ROOT/scripts/smoke-probe.swift" "$DEBUG_PID" "7-app-3rows" 325 254; then
     note "场景 3 PASS"
 else
     note "场景 3 FAIL"
     FAIL=1
 fi
 
-# ---------- 5c. 场景四:100 app → 高度不越过屏幕可用区域 ----------
+# ---------- 5c. 场景四:100 app 旧配置 → 默认 8 列且最多两行 ----------
 printf '%s' "$FIXTURE_100" > "$APPS_JSON"
 note "apps.json 已替换为 100-app 夹具"
-note "场景 4/4:100 app,断言面板宽度 590、高度按屏幕可用区域钳制(鼠标将被 warp,勿动)…"
-if swift "$ROOT/scripts/smoke-probe.swift" "$DEBUG_PID" "100-app-clamped" 590 clamped; then
+note "场景 4/4:100 app,默认 8 列且最多两行,断言面板 778×254(鼠标将被 warp,勿动)…"
+if swift "$ROOT/scripts/smoke-probe.swift" "$DEBUG_PID" "100-app-8col-2rows" 778 254; then
     note "场景 4 PASS"
 else
     note "场景 4 FAIL"

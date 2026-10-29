@@ -34,7 +34,7 @@ enum VerifyConfig {
         }
         check(initial.apps.isEmpty, "初始 apps 为空")
         check(initial.settings == nil, "初始无 settings 节点")
-        check((initial.settings?.resolvedIconsPerRow ?? 6) == 6, "默认每行 6 个")
+        check((initial.settings?.resolvedIconsPerRow ?? 8) == 8, "默认每行 8 个")
         check((initial.settings?.resolvedOpenDelay ?? 0.15) == 0.15, "默认展开延迟 0.15s")
 
         // ---------- 2. 添加 / 去重 ----------
@@ -88,7 +88,7 @@ enum VerifyConfig {
             check(file.settings != nil, "settings 节点仍被解析(逐字段容错)")
             check(file.settings?.resolvedOpenDelay == 0.15, "非法 openDelay(字符串)回退默认 0.15")
             check(file.settings?.resolvedCloseDelay == 2.0, "超范围 closeDelay(5)clamp 到上限 2.0")
-            check(file.settings?.resolvedIconsPerRow == 6, "超范围 iconsPerRow(2)回退默认 6")
+            check(file.settings?.resolvedIconsPerRow == 8, "超范围 iconsPerRow(2)回退默认 8")
         } else { check(false, "含非法 settings 字段的文件应能加载") }
 
         // settings 节点整体类型错误:整体降级,不炸
@@ -124,7 +124,7 @@ enum VerifyConfig {
             check(reset.apps.map(\.identity) == [safari.identity], "恢复默认保留 apps")
             check(reset.settings?.resolvedOpenDelay == 0.15, "恢复默认展开延迟")
             check(reset.settings?.resolvedCloseDelay == 0.35, "恢复默认收起延迟")
-            check(reset.settings?.resolvedIconsPerRow == 6, "恢复默认每行数量")
+            check(reset.settings?.resolvedIconsPerRow == 8, "恢复默认每行数量")
             check(reset.settings?.loginItemEnabled == false, "恢复默认保留登录项选择")
         } else { check(false, "恢复默认后加载失败") }
         check(!AppConfig.resetInteractionSettings(), "重复恢复默认不写盘")
@@ -184,7 +184,35 @@ enum VerifyConfig {
         } else { check(false, "隐藏排序后加载失败") }
         check(AppConfig.setHidden(identity: notes.identity, hidden: false), "恢复隐藏条目")
 
-        // ---------- 10. 文件监控:忽略内部写回,识别外部原子替换 ----------
+        // ---------- 10. 16 个可见应用上限及旧配置超额兼容 ----------
+        let capacityApps = (1...16).map {
+            AppEntry(name: "App\($0)", bundleID: "com.example.capacity\($0)", path: nil)
+        }
+        let hiddenOnly = AppEntry(name: "隐藏", bundleID: "com.example.hiddenOnly", path: nil, hidden: true)
+        let capacityData = try! JSONEncoder().encode(AppConfigFile(apps: capacityApps + [hiddenOnly]))
+        try! capacityData.write(to: AppConfig.fileURL, options: .atomic)
+        let extra = AppEntry(name: "额外", bundleID: "com.example.extra", path: nil)
+        check(!AppConfig.add(extra), "第 17 个可见应用被拒绝")
+        check(AppConfig.addWithResult(extra) == .limitReached, "添加结果明确为达到上限")
+        check(AppConfig.setHidden(identity: capacityApps[0].identity, hidden: true), "隐藏一个应用释放可见名额")
+        check(AppConfig.add(extra), "释放名额后可添加新应用")
+        check(
+            AppConfig.setHiddenWithResult(identity: capacityApps[0].identity, hidden: false) == .limitReached,
+            "满员时恢复隐藏被拒绝"
+        )
+
+        let legacyOverflow = try! JSONEncoder().encode(AppConfigFile(apps: capacityApps + [extra]))
+        try! legacyOverflow.write(to: AppConfig.fileURL, options: .atomic)
+        if case .success(let legacy) = AppConfig.loadConfig() {
+            check(legacy.apps.count == 17, "旧配置超额条目原样保留")
+        } else { check(false, "旧超额配置加载失败") }
+        let another = AppEntry(name: "再加一个", bundleID: "com.example.another", path: nil)
+        check(AppConfig.addWithResult(another) == .limitReached, "旧配置超额时仍禁止继续新增")
+
+        // 文件监控用例从空配置开始,避免容量上限干扰内部写入断言。
+        try! #"{ "apps": [] }"#.write(to: AppConfig.fileURL, atomically: true, encoding: .utf8)
+
+        // ---------- 11. 文件监控:忽略内部写回,识别外部原子替换 ----------
         let monitor = ConfigFileMonitor()
         var externalChanges = 0
         monitor.onChange = { externalChanges += 1 }

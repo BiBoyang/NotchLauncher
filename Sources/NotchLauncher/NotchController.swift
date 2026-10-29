@@ -264,7 +264,10 @@ final class NotchController: NSResponder {
     private func maximumContentHeight() -> CGFloat {
         guard let screen else { return .greatestFiniteMagnitude }
         let maximumPanelHeight = max(160, screen.frame.maxY - screen.visibleFrame.minY - 16)
-        return max(AppCellView.cellSize.height, maximumPanelHeight - notchRect.height - 28)
+        let screenLimited = max(AppCellView.cellSize.height, maximumPanelHeight - notchRect.height - 28)
+        let twoRows = AppCellView.cellSize.height * CGFloat(LauncherSettings.maxVisibleRows)
+            + CGFloat(LauncherSettings.maxVisibleRows - 1) * 10
+        return min(screenLimited, twoRows)
     }
 
     private func panelTargetRect(size: CGSize, screen: NSScreen) -> NSRect {
@@ -327,10 +330,17 @@ final class NotchController: NSResponder {
             }
             refreshApps()
         case .setHidden(let identity, let hidden):
-            if AppConfig.setHidden(identity: identity, hidden: hidden) {
+            switch AppConfig.setHiddenWithResult(identity: identity, hidden: hidden) {
+            case .written:
                 nlLog("\(hidden ? "隐藏" : "恢复")条目:\(identity)")
+                refreshApps()
+            case .limitReached:
+                presentAppLimitAlert()
+            case .noChange, .failed:
+                break
             }
-            refreshApps()
+        case .appLimitReached:
+            presentAppLimitAlert()
         case .dragBegan:
             setDragInProgress(true)
         case .dragEnded:
@@ -379,9 +389,14 @@ final class NotchController: NSResponder {
         guard panel.runModal() == .OK else { return }
 
         var added = false
+        var limitReached = false
         for url in panel.urls {
             if let entry = AppConfig.entry(forAppAt: url) {
-                added = AppConfig.add(entry) || added
+                switch AppConfig.addWithResult(entry) {
+                case .written: added = true
+                case .limitReached: limitReached = true
+                case .noChange, .failed: break
+                }
             }
         }
         if added {
@@ -389,6 +404,7 @@ final class NotchController: NSResponder {
             refreshApps()
         }
         closePanel()
+        if limitReached { presentAppLimitAlert() }
     }
 
     private func presentSettings() {
@@ -396,6 +412,14 @@ final class NotchController: NSResponder {
             settingsWindow = SettingsWindowController()
         }
         settingsWindow?.show()
+    }
+
+    private func presentAppLimitAlert() {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "最多可添加 \(AppConfig.visibleAppLimit) 个可见应用"
+        alert.informativeText = "请先隐藏或移除不再常用的应用;旧配置中已有的超额条目不会被删除。"
+        alert.runModal()
     }
 
     private func activate(_ app: ResolvedApp) {
