@@ -12,11 +12,14 @@
 
 - **悬停展开**:鼠标移到刘海区域,面板自动下拉展开;移开自动收起
 - **点击启动**:点击图标启动应用;已运行则激活置前
-- **运行中前置**:正在运行的应用自动排到最前,图标全彩并带小圆点;未运行的淡化靠后
-- **多行网格**:每行最多 6 个图标,超出自动折行,面板向下加长
+- **位置固定**:图标严格按配置顺序排列,不因应用启停而跳动;运行中的应用图标全彩并带小圆点,未运行的淡化
+- **多行网格**:每行默认 6 个图标(3–10 可配),超出自动折行,面板向下加长
 - **拖入添加**:从 Finder/Dock 拖 `.app` 到刘海,面板展开后松手即添加(自动读取名称/bundleID,重复条目自动跳过)
-- **拖出删除**:把面板里的图标拖出面板区域(越界超过 24pt)松手即删除;小幅误拖会自动回弹不删
-- **右键菜单**:面板空白处右键 → 添加应用…(NSOpenPanel 多选)/ 编辑配置文件 / 重新加载 / 退出
+- **拖动排序**:在面板内直接拖动图标即可调整顺序,其他图标实时让位,松手写回配置
+- **拖出删除**:把面板里的图标拖出面板区域(越界超过 24pt)松手即删除;面板内松手或小幅误拖自动回弹不删
+- **图标右键菜单**:右键单个图标 → 打开 / 退出 / 强制退出(运行中)/ 在 Finder 中显示 / 从面板移除
+- **面板菜单**:面板空白处右键 → 添加应用…(NSOpenPanel 多选)/ 设置… / 编辑配置文件 / 重新加载 / 退出
+- **偏好设置**:右键 → 设置…,图形化调整悬停展开/收起延迟与每行图标数,改动即时生效
 - **开机自启**:安装到 `/Applications` 或 `~/Applications` 后,首次启动自动注册登录项(可在系统设置中关闭)
 
 ## 要求
@@ -33,17 +36,25 @@
 
 配置文件:`~/Library/Application Support/NotchLauncher/apps.json`(首次运行自动创建)。
 
-UI 操作(拖入/拖出/右键添加)会自动写回该文件;也可以右键 →「编辑配置文件」手工编辑,格式:
+UI 操作(拖入/拖出/拖动排序/右键菜单)会自动写回该文件;也可以右键 →「编辑配置文件」手工编辑,格式:
 
 ```json
 {
+  "settings": {
+    "openDelay": 0.15,
+    "closeDelay": 0.35,
+    "iconsPerRow": 6
+  },
   "apps": [
     { "name": "Safari", "bundleID": "com.apple.Safari" }
   ]
 }
 ```
 
-条目身份:bundleID 优先,无 bundleID 用 path。改完右键 →「重新加载」生效。
+- `apps` 数组的顺序就是面板上图标的显示顺序
+- 条目身份:bundleID 优先,无 bundleID 用 path。改完右键 →「重新加载」生效
+- `settings` 整个节点可省略,省略或字段非法时回退默认值(逐字段容错,单字段写错不影响其它配置)
+- 延迟范围 0–2 秒,每行图标数范围 3–10;通常直接用右键 →「设置…」图形化调整即可
 
 ## 构建与安装
 
@@ -61,7 +72,14 @@ open build/NotchLauncher.app
 scripts/smoke.sh
 ```
 
-一条命令完成:构建 debug 版 → 用 1-app / 7-app 夹具替换 `apps.json` → warp 触发面板展开 → 从系统窗口服务器(CGWindowList)读面板真实 bounds 断言(1 app 325×152、7 app 590×254、相对刘海居中、窗口 layer 33)→ 恢复配置并重启日常实例。全 PASS exit 0,任一 FAIL exit 1。几何断言不需要辅助功能/屏幕录制权限。
+一条命令完成:构建 debug 版 → 用三组夹具替换 `apps.json` → warp 触发面板展开 → 从系统窗口服务器(CGWindowList)读面板真实 bounds 断言(1 app 325×152、7 app 590×254、7 app + 每行 3 个 325×356,均相对刘海居中、窗口 layer 33)→ 恢复配置并重启日常实例。全 PASS exit 0,任一 FAIL exit 1。几何断言不需要辅助功能/屏幕录制权限。
+
+数据层(配置读写、reorder、settings 容错/clamp)的纯逻辑断言,不接管鼠标:
+
+```bash
+swiftc Sources/NotchLauncher/AppConfig.swift scripts/verify-config.swift -o /tmp/nl-verify-config \
+  && /tmp/nl-verify-config
+```
 
 手动观察开合行为(应用运行中):
 
@@ -75,13 +93,16 @@ swift scripts/smoke-warp.swift
 
 A macOS launcher that lives in the notch — hover the notch to reveal a panel, click an icon to launch or activate the app.
 
-- Running apps sort first, full-color with a dot; idle apps dim to the back
-- Grid layout: up to 6 icons per row, wraps to more rows as you add apps
+- Icons keep a fixed order (the config array order) and never reshuffle when apps launch or quit; running apps are full-color with a dot, idle apps dimmed
+- Grid layout: 6 icons per row by default (3–10 configurable), wraps to more rows as you add apps
 - Add apps: drag a `.app` onto the notch, the panel expands, drop to add (name/bundleID detected automatically, duplicates skipped)
-- Remove apps: drag an icon out of the panel (more than 24pt past the edge) and release; small drags bounce back harmlessly
-- Right-click the panel for a menu: add apps via file picker, edit config, reload, quit
+- Reorder apps by dragging an icon inside the panel — siblings move aside live, drop writes the new order back
+- Remove apps: drag an icon out of the panel (more than 24pt past the edge) and release; drops inside the panel and small drags bounce back harmlessly
+- Right-click an icon: open / quit / force quit (when running) / reveal in Finder / remove from panel
+- Right-click the panel for a menu: add apps via file picker, Settings…, edit config, reload, quit
+- Settings window: tune hover open/close delays and icons per row, applied instantly
 - Auto-registers as a login item when installed under `/Applications` or `~/Applications` (toggle in System Settings)
-- Config lives at `~/Library/Application Support/NotchLauncher/apps.json` and is written back by UI operations
+- Optional `settings` object in `~/Library/Application Support/NotchLauncher/apps.json` (`openDelay`, `closeDelay`, `iconsPerRow`); per-field tolerant decoding with defaults and clamping
 - Requires macOS 13+ and a MacBook with a notch
 - Download the signed & notarized build from [Releases](https://github.com/BiBoyang/NotchLauncher/releases/latest), or build it yourself with `swift build` / `./scripts/build-app.sh`
 

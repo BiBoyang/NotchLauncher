@@ -2,14 +2,17 @@
 # NotchLauncher 几何回归冒烟测试
 #
 # 一条命令完成:构建 debug 版 → 1-app 夹具断言面板 325×152 → 7-app 夹具断言 590×254
-# → 恢复 apps.json → 重启日常安装态实例。全 PASS exit 0,任一 FAIL exit 1。
+# → 7-app + iconsPerRow=3 夹具断言 325×356 → 恢复 apps.json → 重启日常安装态实例。
+# 全 PASS exit 0,任一 FAIL exit 1。
 #
 # 注意:运行期间鼠标会被 warp 移动几秒,请勿触碰鼠标;面板开合断言读系统窗口服务器的
 # 真实 bounds(CGWindowList),不需要辅助功能/屏幕录制权限。
 #
 # 几何基线(规格常量,独立于实现):
 #   cell 84×92、行距 10、padding 水平 36 / 顶 notchHeight+12 / 底 16、刘海 185×32
-#   1 app:325×152;7 app(6 列折 2 行):590×254;窗口 layer = statusBar(25)+8 = 33
+#   1 app:325×152;7 app(6 列折 2 行):590×254;
+#   7 app + 每行 3 个(折 3 行):宽 max(3×84+2×10+36, 325)=325,高 32+12+(3×92+2×10)+16=356
+#   窗口 layer = statusBar(25)+8 = 33
 
 set -u
 
@@ -30,6 +33,17 @@ FIXTURE_7='{"apps":[
 {"name":"信息","bundleID":"com.apple.MobileSMS"},
 {"name":"FaceTime","bundleID":"com.apple.FaceTime"}
 ]}'
+
+# 同上 7 个 app,但每行 3 个:验证 settings.iconsPerRow 生效
+FIXTURE_7_3ROWS='{"apps":[
+{"name":"Safari","bundleID":"com.apple.Safari"},
+{"name":"备忘录","bundleID":"com.apple.Notes"},
+{"name":"日历","bundleID":"com.apple.iCal"},
+{"name":"音乐","bundleID":"com.apple.Music"},
+{"name":"照片","bundleID":"com.apple.Photos"},
+{"name":"信息","bundleID":"com.apple.MobileSMS"},
+{"name":"FaceTime","bundleID":"com.apple.FaceTime"}
+],"settings":{"iconsPerRow":3}}'
 
 FAIL=0
 note() { echo "[smoke] $*"; }
@@ -123,11 +137,22 @@ fi
 # ---------- 5. 场景二:7 app → 590×254 ----------
 printf '%s' "$FIXTURE_7" > "$APPS_JSON"
 note "apps.json 已替换为 7-app 夹具"
-note "场景 2/2:7 app,断言面板 590×254(鼠标将被 warp,勿动)…"
+note "场景 2/3:7 app,断言面板 590×254(鼠标将被 warp,勿动)…"
 if swift "$ROOT/scripts/smoke-probe.swift" "$DEBUG_PID" "7-app" 590 254; then
     note "场景 2 PASS"
 else
     note "场景 2 FAIL"
+    FAIL=1
+fi
+
+# ---------- 5b. 场景三:7 app + iconsPerRow=3 → 325×356 ----------
+printf '%s' "$FIXTURE_7_3ROWS" > "$APPS_JSON"
+note "apps.json 已替换为 7-app/每行3个 夹具"
+note "场景 3/3:iconsPerRow=3,断言面板 325×356(鼠标将被 warp,勿动)…"
+if swift "$ROOT/scripts/smoke-probe.swift" "$DEBUG_PID" "7-app-3rows" 325 356; then
+    note "场景 3 PASS"
+else
+    note "场景 3 FAIL"
     FAIL=1
 fi
 

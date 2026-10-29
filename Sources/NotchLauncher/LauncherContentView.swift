@@ -3,9 +3,26 @@ import Cocoa
 /// 拖出删除专用私有拖拽类型——严禁暴露 fileURL/file promise,防拖到 Finder 复制 .app。
 private let cellRemovalPasteboardType = NSPasteboard.PasteboardType("dev.boyang.NotchLauncher.cellRemoval")
 
-/// 图标拖出会话的拖拽源。独立对象而非让 cell 担任,避免删除后 cell 随 reload 释放的生命周期问题。
+/// 拖动排序时的占位格:源 cell 隐藏后占据其视觉位置,随鼠标在行间移动。
+private final class DropGapView: NSView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.white.withAlphaComponent(0.14).cgColor
+        layer?.cornerRadius = 10
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: AppCellView.cellSize.width, height: AppCellView.cellSize.height)
+    }
+}
+
+/// 图标拖出/拖内排序会话的拖拽源。独立对象而非让 cell 担任,避免删除后 cell 随 reload 释放的生命周期问题。
 private final class CellRemovalDragSource: NSObject, NSDraggingSource {
     var onWillBegin: (() -> Void)?
+    var onMoved: ((NSPoint) -> Void)?
     var onEnded: ((NSPoint) -> Void)?
 
     func draggingSession(
@@ -23,6 +40,10 @@ private final class CellRemovalDragSource: NSObject, NSDraggingSource {
         onWillBegin?()
     }
 
+    func draggingSession(_ session: NSDraggingSession, movedTo screenPoint: NSPoint) {
+        onMoved?(screenPoint)
+    }
+
     func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
         onEnded?(screenPoint)
     }
@@ -32,8 +53,14 @@ final class AppCellView: NSView {
     static let cellSize = NSSize(width: 84, height: 92)
 
     private let app: ResolvedApp
-    private let identity: String
+    let identity: String
     private let actionHandler: (LauncherAction) -> Void
+
+    /// 面板内排序协调回调,由 LauncherContentView 装配。
+    var onDragWillBegin: ((String) -> Void)?
+    var onDragMoved: ((String, NSPoint) -> Void)?
+    var onDragEnded: ((String, NSPoint) -> Void)?
+
     private var hovered = false { didSet { needsDisplay = true } }
     private var mouseDownPoint: NSPoint?
     private var activeDragSource: CellRemovalDragSource?
@@ -53,7 +80,6 @@ final class AppCellView: NSView {
         label.frame = NSRect(x: 2, y: 20, width: 80, height: 14)
         label.alignment = .center
         label.font = NSFont.systemFont(ofSize: 10, weight: .medium)
-        label.textColor = .white
         label.lineBreakMode = .byTruncatingTail
         addSubview(label)
 
@@ -63,17 +89,21 @@ final class AppCellView: NSView {
             dot.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.9).cgColor
             dot.layer?.cornerRadius = 3
             addSubview(dot)
+        } else {
+            label.textColor = NSColor.white.withAlphaComponent(0.55)
         }
 
         if app.url == nil {
             alphaValue = 0.35
             toolTip = "未安装或无法解析"
-        } else {
+            imageView.alphaValue = 1
+            label.textColor = NSColor.white.withAlphaComponent(0.55)
+        } else if !app.isRunning {
             // 已安装但未运行:图标与名字淡化;运行中维持全彩图标 + 白色名字
-            if !app.isRunning {
-                imageView.alphaValue = 0.6
-                label.textColor = NSColor.white.withAlphaComponent(0.55)
-            }
+            imageView.alphaValue = 0.6
+            toolTip = app.name
+        } else {
+            label.textColor = .white
             toolTip = app.name
         }
 
@@ -101,6 +131,43 @@ final class AppCellView: NSView {
     override func mouseExited(with event: NSEvent) { hovered = false }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    // MARK: - 右键菜单
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        guard app.url != nil else { return nil }
+        let menu = NSMenu()
+        if runningApplication != nil {
+            addMenuItem(menu, title: "退出", action: #selector(terminateApp))
+            addMenuItem(menu, title: "强制退出", action: #selector(forceTerminateApp))
+        } else {
+            addMenuItem(menu, title: "打开", action: #selector(openApp))
+        }
+        menu.addItem(.separator())
+        addMenuItem(menu, title: "在 Finder 中显示", action: #selector(revealApp))
+        menu.addItem(.separator())
+        addMenuItem(menu, title: "从面板移除", action: #selector(removeSelf))
+        return menu
+    }
+
+    private func addMenuItem(_ menu: NSMenu, title: String, action: Selector) {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = self
+        menu.addItem(item)
+    }
+
+    private var runningApplication: NSRunningApplication? {
+        guard let url = app.url, let bundleID = Bundle(url: url)?.bundleIdentifier else { return nil }
+        return NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first
+    }
+
+    @objc private func openApp() { actionHandler(.activate(app)) }
+    @objc private func terminateApp() { actionHandler(.terminate(app, force: false)) }
+    @objc private func forceTerminateApp() { actionHandler(.terminate(app, force: true)) }
+    @objc private func revealApp() { actionHandler(.reveal(app)) }
+    @objc private func removeSelf() { actionHandler(.remove(identity: identity)) }
+
+    // MARK: - 左键:点击激活 / 拖动发起
 
     override func mouseDown(with event: NSEvent) {
         mouseDownPoint = convert(event.locationInWindow, from: nil)
@@ -144,14 +211,19 @@ final class AppCellView: NSView {
 
         let source = CellRemovalDragSource()
         source.onWillBegin = { [weak self] in
-            self?.actionHandler(.dragBegan)
+            guard let self else { return }
+            self.onDragWillBegin?(self.identity)
         }
-        let identity = self.identity
+        source.onMoved = { [weak self] screenPoint in
+            guard let self else { return }
+            self.onDragMoved?(self.identity, screenPoint)
+        }
         source.onEnded = { [weak self] screenPoint in
             // 异步派发:避免在 session 回调栈里直接触发 reload 拆毁 cell
             DispatchQueue.main.async {
-                self?.actionHandler(.removeRequest(identity: identity, dropPoint: screenPoint))
-                self?.activeDragSource = nil
+                guard let self else { return }
+                self.onDragEnded?(self.identity, screenPoint)
+                self.activeDragSource = nil
             }
         }
         activeDragSource = source
@@ -166,8 +238,16 @@ final class LauncherContentView: NSView {
     var actionHandler: ((LauncherAction) -> Void)?
     var panelExpanded = false { didSet { needsDisplay = true } }
 
-    private var stack: NSStackView?
+    private var grid: NSStackView?
+    private var rows: [NSStackView] = []
+    private var cellsByIdentity: [String: AppCellView] = [:]
     private var notchHeight: CGFloat = 0
+    private var iconsPerRow = LauncherSettings.defaultIconsPerRow
+
+    /// 图标排序拖拽会话进行中(区别于 Finder 文件拖入);期间拒绝 reload 拆毁网格。
+    private var reorderIdentity: String?
+    var isReorderSessionActive: Bool { reorderIdentity != nil }
+    private var gapView: DropGapView?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -189,7 +269,7 @@ final class LauncherContentView: NSView {
         }
     }
 
-    // MARK: - 拖入添加
+    // MARK: - 拖入添加(Finder .app)
 
     private var dragHighlighted = false { didSet { needsDisplay = true } }
 
@@ -241,9 +321,13 @@ final class LauncherContentView: NSView {
         return true
     }
 
+    // MARK: - 空白处右键菜单
+
     override func menu(for event: NSEvent) -> NSMenu? {
         let menu = NSMenu()
         addItem(menu, title: "添加应用…", action: #selector(menuAddApps))
+        addItem(menu, title: "设置…", action: #selector(menuSettings))
+        menu.addItem(.separator())
         addItem(menu, title: "编辑配置文件", action: #selector(menuEditConfig))
         addItem(menu, title: "重新加载", action: #selector(menuReload))
         menu.addItem(.separator())
@@ -258,46 +342,46 @@ final class LauncherContentView: NSView {
     }
 
     @objc private func menuAddApps() { actionHandler?(.addApps) }
+    @objc private func menuSettings() { actionHandler?(.openSettings) }
     @objc private func menuEditConfig() { actionHandler?(.openConfig) }
     @objc private func menuReload() { actionHandler?(.reload) }
     @objc private func menuQuit() { actionHandler?(.quit) }
     @objc private func openConfigClicked() { actionHandler?(.openConfig) }
 
-    /// 每行最多 6 个 cell,超出折行;行数 = ceil(n / 6),面板向下加长。
-    private static let maxCellsPerRow = 6
+    // MARK: - 网格构建(固定按配置顺序)
 
     func reloadApps(notchHeight: CGFloat) {
         self.notchHeight = notchHeight
-        stack?.removeFromSuperview()
+        grid?.removeFromSuperview()
+        rows = []
+        cellsByIdentity = [:]
+        reorderIdentity = nil
+        gapView = nil
 
-        let grid = NSStackView()
-        grid.orientation = .vertical
-        grid.alignment = .centerX
-        grid.spacing = 10
-        grid.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(grid)
+        let newGrid = NSStackView()
+        newGrid.orientation = .vertical
+        newGrid.alignment = .centerX
+        newGrid.spacing = 10
+        newGrid.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(newGrid)
         NSLayoutConstraint.activate([
-            grid.centerXAnchor.constraint(equalTo: centerXAnchor),
-            grid.topAnchor.constraint(equalTo: topAnchor, constant: notchHeight + 12),
+            newGrid.centerXAnchor.constraint(equalTo: centerXAnchor),
+            newGrid.topAnchor.constraint(equalTo: topAnchor, constant: notchHeight + 12),
         ])
 
         var cells: [NSView] = []
-        switch AppConfig.load() {
-        case .success(let entries) where !entries.isEmpty:
-            // 稳定分区:运行中整组在前,组内保持配置文件原始相对顺序;必须在切块分行之前完成
-            let resolved = entries.map { (entry: $0, app: AppConfig.resolve($0)) }
-            let ordered = resolved.filter { $0.app.isRunning } + resolved.filter { !$0.app.isRunning }
-            for item in ordered {
-                cells.append(AppCellView(app: item.app, identity: item.entry.identity) { [weak self] action in
-                    self?.actionHandler?(action)
-                })
+        switch AppConfig.loadConfig() {
+        case .success(let file):
+            iconsPerRow = file.settings?.resolvedIconsPerRow ?? LauncherSettings.defaultIconsPerRow
+            // 固定顺序:严格按 apps.json,运行状态仅靠圆点/淡化表达,不重排
+            for entry in file.apps {
+                cells.append(makeCell(for: entry, app: AppConfig.resolve(entry)))
             }
-        case .success:
-            cells.append(makeMessageCell(
-                title: "还没有添加应用",
-                buttonTitle: "打开配置文件"
-            ))
+            if file.apps.isEmpty {
+                cells.append(makeMessageCell(title: "还没有添加应用", buttonTitle: "打开配置文件"))
+            }
         case .failure(let error):
+            iconsPerRow = LauncherSettings.defaultIconsPerRow
             cells.append(makeMessageCell(
                 title: "配置文件格式错误:\(error.localizedDescription)",
                 buttonTitle: "打开配置文件"
@@ -305,18 +389,30 @@ final class LauncherContentView: NSView {
         }
 
         // 空态/错误态只有 1 个条目,自然退化为单行单格
-        for start in stride(from: 0, to: cells.count, by: Self.maxCellsPerRow) {
-            let end = min(start + Self.maxCellsPerRow, cells.count)
+        for start in stride(from: 0, to: cells.count, by: iconsPerRow) {
+            let end = min(start + iconsPerRow, cells.count)
             let row = NSStackView(views: Array(cells[start..<end]))
             row.spacing = 10
-            grid.addArrangedSubview(row)
+            newGrid.addArrangedSubview(row)
+            rows.append(row)
         }
 
-        stack = grid
+        grid = newGrid
+    }
+
+    private func makeCell(for entry: AppEntry, app: ResolvedApp) -> AppCellView {
+        let cell = AppCellView(app: app, identity: entry.identity) { [weak self] action in
+            self?.actionHandler?(action)
+        }
+        cell.onDragWillBegin = { [weak self] identity in self?.reorderBegan(identity) }
+        cell.onDragMoved = { [weak self] identity, point in self?.reorderMoved(identity, screenPoint: point) }
+        cell.onDragEnded = { [weak self] identity, point in self?.reorderEnded(identity, screenPoint: point) }
+        cellsByIdentity[entry.identity] = cell
+        return cell
     }
 
     func desiredPanelSize(minimumWidth: CGFloat) -> CGSize {
-        let fitting = stack?.fittingSize ?? NSSize(width: 280, height: 92)
+        let fitting = grid?.fittingSize ?? NSSize(width: 280, height: 92)
         return CGSize(
             width: max(fitting.width + 36, minimumWidth),
             height: notchHeight + 12 + fitting.height + 16
@@ -351,5 +447,107 @@ final class LauncherContentView: NSView {
             vertical.widthAnchor.constraint(lessThanOrEqualTo: container.widthAnchor, constant: -16),
         ])
         return container
+    }
+
+    // MARK: - 面板内拖放排序
+
+    private func reorderBegan(_ identity: String) {
+        guard reorderIdentity == nil, let source = cellsByIdentity[identity] else { return }
+        reorderIdentity = identity
+        actionHandler?(.dragBegan)
+
+        // 源 cell 立即隐藏(stack view 自动收起其占位),同位置放入 gap
+        source.isHidden = true
+        let gap = DropGapView()
+        gapView = gap
+        if let row = source.superview as? NSStackView,
+           let index = row.arrangedSubviews.firstIndex(where: { $0 === source }) {
+            row.insertArrangedSubview(gap, at: index)
+        }
+    }
+
+    private func reorderMoved(_ identity: String, screenPoint: NSPoint) {
+        guard reorderIdentity == identity,
+              let gapView,
+              let window,
+              let grid,
+              !rows.isEmpty
+        else { return }
+
+        let gridPoint = grid.convert(window.convertPoint(fromScreen: screenPoint), from: nil)
+        guard let row = rows.first(where: { $0.frame.insetBy(dx: 0, dy: -12).contains(gridPoint) }) else {
+            return // 落在所有行之外:保持 gap 在最近位置,不跳动
+        }
+
+        let rowPoint = row.convert(gridPoint, from: grid)
+        // 可见槽位 = 排除 gap 自身与隐藏的源 cell;按中点决定插入槽位序号
+        let visibleViews = row.arrangedSubviews.filter { !($0 is DropGapView) && !$0.isHidden }
+        var slot = visibleViews.count
+        for (index, view) in visibleViews.enumerated() where rowPoint.x < view.frame.midX {
+            slot = index
+            break
+        }
+
+        gapView.removeFromSuperview()
+        // 映射回 arrangedSubview 下标(隐藏源 cell 仍占着一个 arranged 位置)
+        let visibleArrangedIndices = row.arrangedSubviews.indices.filter {
+            !(row.arrangedSubviews[$0] is DropGapView) && !row.arrangedSubviews[$0].isHidden
+        }
+        if slot < visibleArrangedIndices.count {
+            row.insertArrangedSubview(gapView, at: visibleArrangedIndices[slot])
+        } else {
+            row.addArrangedSubview(gapView)
+        }
+    }
+
+    private func reorderEnded(_ identity: String, screenPoint: NSPoint) {
+        guard reorderIdentity == identity else { return }
+        reorderIdentity = nil
+        let gap = gapView
+        gapView = nil
+
+        guard let window else {
+            gap?.removeFromSuperview()
+            cellsByIdentity[identity]?.isHidden = false
+            actionHandler?(.dragEnded)
+            return
+        }
+
+        // 越界超过 24pt → 删除;面板 frame 与 24pt 环之间 → 误拖回弹;frame 内 → 落位排序
+        let expanded = window.frame.insetBy(dx: -24, dy: -24)
+        guard expanded.contains(screenPoint) else {
+            gap?.removeFromSuperview()
+            actionHandler?(.removeRequest(identity: identity, dropPoint: screenPoint))
+            return
+        }
+
+        let newOrder = visualIdentityOrder(sourceIdentity: identity, gap: gap)
+        gap?.removeFromSuperview()
+
+        let changed = AppConfig.reorder(orderedIdentities: newOrder)
+        actionHandler?(.dragEnded)
+        if changed {
+            // reload 由 controller 的 appsChanged 统一完成(含窗口尺寸动画)
+            actionHandler?(.appsChanged)
+        } else {
+            // 顺序未变:不 reload,直接恢复源 cell,避免闪烁
+            cellsByIdentity[identity]?.isHidden = false
+        }
+    }
+
+    /// 按当前视觉排布(gap 所在处即源 cell 新位置)收集 identity 顺序。
+    private func visualIdentityOrder(sourceIdentity: String, gap: DropGapView?) -> [String] {
+        var result: [String] = []
+        for row in rows {
+            for view in row.arrangedSubviews {
+                if let gap, view === gap {
+                    result.append(sourceIdentity)
+                } else if let cell = view as? AppCellView, cell.identity != sourceIdentity {
+                    result.append(cell.identity)
+                }
+                // 隐藏的源 cell:跳过,它的身份已由 gap 位置代表
+            }
+        }
+        return result
     }
 }

@@ -30,6 +30,7 @@ final class NotchController: NSResponder {
     private var state: State = .closed
     private var notchRect: NSRect = .zero
     private var screen: NSScreen?
+    private var settingsWindow: SettingsWindowController?
 
     private var openWorkItem: DispatchWorkItem?
     private var closeWorkItem: DispatchWorkItem?
@@ -38,18 +39,68 @@ final class NotchController: NSResponder {
     /// 拖拽会话(进或出)进行中:抑制 mouseExited 自动关闭。
     private var dragInProgress = false
 
-    private let openDelay: TimeInterval = 0.15
-    private let closeDelay: TimeInterval = 0.35
+    /// 当前生效的设置参数;nil 时全部使用默认值。
+    private var settings: LauncherSettings?
+    private var openDelay: TimeInterval {
+        settings?.resolvedOpenDelay ?? LauncherSettings.defaultOpenDelay
+    }
+    private var closeDelay: TimeInterval {
+        settings?.resolvedCloseDelay ?? LauncherSettings.defaultCloseDelay
+    }
     private let hoverMarginSide: CGFloat = 4
     private let hoverMarginBottom: CGFloat = 8
 
     func start() {
         AppConfig.ensureExists()
+        reloadSettings()
         rebuildWindow()
+        installNotificationObservers()
     }
 
     func screenParametersChanged() {
         rebuildWindow()
+    }
+
+    // MARK: - 设置与通知
+
+    private func reloadSettings() {
+        if case .success(let file) = AppConfig.loadConfig() {
+            settings = file.settings
+        }
+    }
+
+    private func installNotificationObservers() {
+        let workspaceCenter = NSWorkspace.shared.notificationCenter
+        workspaceCenter.addObserver(
+            self,
+            selector: #selector(runningAppsChanged),
+            name: NSWorkspace.didLaunchApplicationNotification,
+            object: nil
+        )
+        workspaceCenter.addObserver(
+            self,
+            selector: #selector(runningAppsChanged),
+            name: NSWorkspace.didTerminateApplicationNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(settingsDidChange),
+            name: .launcherSettingsDidChange,
+            object: nil
+        )
+    }
+
+    /// app 启停:面板开着且不在排序拖拽中时刷新圆点/淡化状态。
+    @objc private func runningAppsChanged() {
+        guard state == .open, contentView?.isReorderSessionActive != true else { return }
+        refreshApps()
+    }
+
+    @objc private func settingsDidChange() {
+        reloadSettings()
+        guard state == .open else { return }
+        refreshApps()
     }
 
     private func hoverFrame(for notch: NSRect) -> NSRect {
@@ -232,6 +283,15 @@ final class NotchController: NSResponder {
         case .activate(let app):
             activate(app)
             closePanel()
+        case .terminate(let app, let force):
+            terminate(app, force: force)
+        case .reveal(let app):
+            revealInFinder(app)
+        case .remove(let identity):
+            if AppConfig.remove(identity: identity) {
+                nlLog("删除条目:\(identity)")
+            }
+            refreshApps()
         case .dragBegan:
             setDragInProgress(true)
         case .dragEnded:
@@ -243,10 +303,13 @@ final class NotchController: NSResponder {
             handleRemoveRequest(identity: identity, dropPoint: dropPoint)
         case .addApps:
             presentOpenPanel()
+        case .openSettings:
+            presentSettings()
         case .openConfig:
             AppConfig.openInEditor()
             closePanel()
         case .reload:
+            reloadSettings()
             contentView?.reloadApps(notchHeight: notchRect.height)
         case .quit:
             NSApp.terminate(nil)
@@ -260,8 +323,8 @@ final class NotchController: NSResponder {
         guard !expanded.contains(dropPoint) else { return }
         if AppConfig.remove(identity: identity) {
             nlLog("删除条目:\(identity)")
-            refreshApps()
         }
+        refreshApps()
     }
 
     /// 右键「添加应用…」:accessory app 先激活再弹 NSOpenPanel,选完关闭面板下拉。
@@ -289,6 +352,13 @@ final class NotchController: NSResponder {
         closePanel()
     }
 
+    private func presentSettings() {
+        if settingsWindow == nil {
+            settingsWindow = SettingsWindowController()
+        }
+        settingsWindow?.show()
+    }
+
     private func activate(_ app: ResolvedApp) {
         guard let url = app.url else { return }
         let bundleID = Bundle(url: url)?.bundleIdentifier
@@ -312,5 +382,26 @@ final class NotchController: NSResponder {
                 }
             }
         }
+    }
+
+    /// 退出 / 强制退出运行中的 app;圆点状态由 workspace 通知自动刷新,不主动 reload。
+    private func terminate(_ app: ResolvedApp, force: Bool) {
+        guard let url = app.url,
+              let bundleID = Bundle(url: url)?.bundleIdentifier,
+              let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first
+        else { return }
+        if force {
+            running.forceTerminate()
+            nlLog("强制退出:\(app.name)")
+        } else {
+            running.terminate()
+            nlLog("退出:\(app.name)")
+        }
+    }
+
+    private func revealInFinder(_ app: ResolvedApp) {
+        guard let url = app.url else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+        nlLog("Finder 定位:\(app.name)")
     }
 }
