@@ -146,6 +146,7 @@ final class AppCellView: NSView {
         menu.addItem(.separator())
         addMenuItem(menu, title: "在 Finder 中显示", action: #selector(revealApp))
         menu.addItem(.separator())
+        addMenuItem(menu, title: "隐藏", action: #selector(hideSelf))
         addMenuItem(menu, title: "从面板移除", action: #selector(removeSelf))
         return menu
     }
@@ -165,6 +166,7 @@ final class AppCellView: NSView {
     @objc private func terminateApp() { actionHandler(.terminate(app, force: false)) }
     @objc private func forceTerminateApp() { actionHandler(.terminate(app, force: true)) }
     @objc private func revealApp() { actionHandler(.reveal(app)) }
+    @objc private func hideSelf() { actionHandler(.setHidden(identity: identity, hidden: true)) }
     @objc private func removeSelf() { actionHandler(.remove(identity: identity)) }
 
     // MARK: - 左键:点击激活 / 拖动发起
@@ -234,20 +236,28 @@ final class AppCellView: NSView {
     }
 }
 
+private final class FlippedDocumentView: NSView {
+    override var isFlipped: Bool { true }
+}
+
 final class LauncherContentView: NSView {
     var actionHandler: ((LauncherAction) -> Void)?
     var panelExpanded = false { didSet { needsDisplay = true } }
 
+    private var scrollView: NSScrollView?
     private var grid: NSStackView?
     private var rows: [NSStackView] = []
     private var cellsByIdentity: [String: AppCellView] = [:]
     private var notchHeight: CGFloat = 0
     private var iconsPerRow = LauncherSettings.defaultIconsPerRow
+    private var visibleContentSize = NSSize(width: 280, height: 92)
 
     /// 图标排序拖拽会话进行中(区别于 Finder 文件拖入);期间拒绝 reload 拆毁网格。
     private var reorderIdentity: String?
     var isReorderSessionActive: Bool { reorderIdentity != nil }
     private var gapView: DropGapView?
+    private var autoScrollTimer: Timer?
+    private var lastDragScreenPoint: NSPoint?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -305,7 +315,6 @@ final class LauncherContentView: NSView {
         actionHandler?(.dragEnded)
     }
 
-    /// 拖拽内容里以 .app 结尾的文件 URL;完整校验在松手时做,不合规静默忽略。
     private func draggedAppURLs(_ info: NSDraggingInfo) -> [URL] {
         let objects = info.draggingPasteboard.readObjects(
             forClasses: [NSURL.self],
@@ -327,6 +336,26 @@ final class LauncherContentView: NSView {
         let menu = NSMenu()
         addItem(menu, title: "添加应用…", action: #selector(menuAddApps))
         addItem(menu, title: "设置…", action: #selector(menuSettings))
+
+        let hiddenEntries: [AppEntry]
+        if case .success(let file) = AppConfig.loadConfig() {
+            hiddenEntries = file.apps.filter { $0.hidden == true }
+        } else {
+            hiddenEntries = []
+        }
+        let hiddenItem = NSMenuItem(title: "已隐藏应用 (\(hiddenEntries.count))", action: nil, keyEquivalent: "")
+        let hiddenMenu = NSMenu()
+        for entry in hiddenEntries {
+            let title = entry.name ?? entry.bundleID ?? entry.path ?? "未知应用"
+            let item = NSMenuItem(title: title, action: #selector(restoreHiddenApp(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = entry.identity
+            hiddenMenu.addItem(item)
+        }
+        hiddenItem.submenu = hiddenMenu
+        hiddenItem.isEnabled = !hiddenEntries.isEmpty
+        menu.addItem(hiddenItem)
+
         menu.addItem(.separator())
         addItem(menu, title: "编辑配置文件", action: #selector(menuEditConfig))
         addItem(menu, title: "重新加载", action: #selector(menuReload))
@@ -348,11 +377,19 @@ final class LauncherContentView: NSView {
     @objc private func menuQuit() { actionHandler?(.quit) }
     @objc private func openConfigClicked() { actionHandler?(.openConfig) }
 
+    @objc private func restoreHiddenApp(_ sender: NSMenuItem) {
+        guard let identity = sender.representedObject as? String else { return }
+        actionHandler?(.setHidden(identity: identity, hidden: false))
+    }
+
     // MARK: - 网格构建(固定按配置顺序)
 
-    func reloadApps(notchHeight: CGFloat) {
+    func reloadApps(notchHeight: CGFloat, maxContentHeight: CGFloat = .greatestFiniteMagnitude) {
         self.notchHeight = notchHeight
-        grid?.removeFromSuperview()
+        stopAutoScroll()
+        lastDragScreenPoint = nil
+        scrollView?.removeFromSuperview()
+        scrollView = nil
         rows = []
         cellsByIdentity = [:]
         reorderIdentity = nil
@@ -363,22 +400,22 @@ final class LauncherContentView: NSView {
         newGrid.alignment = .centerX
         newGrid.spacing = 10
         newGrid.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(newGrid)
-        NSLayoutConstraint.activate([
-            newGrid.centerXAnchor.constraint(equalTo: centerXAnchor),
-            newGrid.topAnchor.constraint(equalTo: topAnchor, constant: notchHeight + 12),
-        ])
 
         var cells: [NSView] = []
         switch AppConfig.loadConfig() {
         case .success(let file):
             iconsPerRow = file.settings?.resolvedIconsPerRow ?? LauncherSettings.defaultIconsPerRow
-            // 固定顺序:严格按 apps.json,运行状态仅靠圆点/淡化表达,不重排
-            for entry in file.apps {
+            let visibleEntries = file.apps.filter { $0.hidden != true }
+            for entry in visibleEntries {
                 cells.append(makeCell(for: entry, app: AppConfig.resolve(entry)))
             }
             if file.apps.isEmpty {
                 cells.append(makeMessageCell(title: "还没有添加应用", buttonTitle: "打开配置文件"))
+            } else if visibleEntries.isEmpty {
+                cells.append(makeMessageCell(
+                    title: "所有应用都已隐藏\n可在面板右键菜单中恢复",
+                    buttonTitle: "打开配置文件"
+                ))
             }
         case .failure(let error):
             iconsPerRow = LauncherSettings.defaultIconsPerRow
@@ -388,7 +425,6 @@ final class LauncherContentView: NSView {
             ))
         }
 
-        // 空态/错误态只有 1 个条目,自然退化为单行单格
         for start in stride(from: 0, to: cells.count, by: iconsPerRow) {
             let end = min(start + iconsPerRow, cells.count)
             let row = NSStackView(views: Array(cells[start..<end]))
@@ -397,7 +433,39 @@ final class LauncherContentView: NSView {
             rows.append(row)
         }
 
+        let fitting = newGrid.fittingSize
+        let visibleHeight = min(fitting.height, maxContentHeight)
+        visibleContentSize = NSSize(width: fitting.width, height: visibleHeight)
+
+        let document = FlippedDocumentView(frame: NSRect(origin: .zero, size: fitting))
+        document.addSubview(newGrid)
+        NSLayoutConstraint.activate([
+            newGrid.centerXAnchor.constraint(equalTo: document.centerXAnchor),
+            newGrid.topAnchor.constraint(equalTo: document.topAnchor),
+        ])
+
+        let scroll = NSScrollView(frame: NSRect(origin: .zero, size: visibleContentSize))
+        scroll.drawsBackground = false
+        scroll.contentView.drawsBackground = false
+        scroll.hasHorizontalScroller = false
+        scroll.hasVerticalScroller = fitting.height > visibleHeight + 0.5
+        scroll.scrollerStyle = .overlay
+        scroll.horizontalScrollElasticity = .none
+        scroll.verticalScrollElasticity = .allowed
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.documentView = document
+        addSubview(scroll)
+        NSLayoutConstraint.activate([
+            scroll.centerXAnchor.constraint(equalTo: centerXAnchor),
+            scroll.topAnchor.constraint(equalTo: topAnchor, constant: notchHeight + 12),
+            scroll.widthAnchor.constraint(equalToConstant: visibleContentSize.width),
+            scroll.heightAnchor.constraint(equalToConstant: visibleContentSize.height),
+        ])
+        scroll.contentView.scroll(to: .zero)
+        scroll.reflectScrolledClipView(scroll.contentView)
+
         grid = newGrid
+        scrollView = scroll
     }
 
     private func makeCell(for entry: AppEntry, app: ResolvedApp) -> AppCellView {
@@ -412,10 +480,9 @@ final class LauncherContentView: NSView {
     }
 
     func desiredPanelSize(minimumWidth: CGFloat) -> CGSize {
-        let fitting = grid?.fittingSize ?? NSSize(width: 280, height: 92)
-        return CGSize(
-            width: max(fitting.width + 36, minimumWidth),
-            height: notchHeight + 12 + fitting.height + 16
+        CGSize(
+            width: max(visibleContentSize.width + 36, minimumWidth),
+            height: notchHeight + 12 + visibleContentSize.height + 16
         )
     }
 
@@ -456,7 +523,6 @@ final class LauncherContentView: NSView {
         reorderIdentity = identity
         actionHandler?(.dragBegan)
 
-        // 源 cell 立即隐藏(stack view 自动收起其占位),同位置放入 gap
         source.isHidden = true
         let gap = DropGapView()
         gapView = gap
@@ -467,6 +533,13 @@ final class LauncherContentView: NSView {
     }
 
     private func reorderMoved(_ identity: String, screenPoint: NSPoint) {
+        guard reorderIdentity == identity else { return }
+        lastDragScreenPoint = screenPoint
+        moveGap(identity, screenPoint: screenPoint)
+        updateAutoScroll()
+    }
+
+    private func moveGap(_ identity: String, screenPoint: NSPoint) {
         guard reorderIdentity == identity,
               let gapView,
               let window,
@@ -476,11 +549,10 @@ final class LauncherContentView: NSView {
 
         let gridPoint = grid.convert(window.convertPoint(fromScreen: screenPoint), from: nil)
         guard let row = rows.first(where: { $0.frame.insetBy(dx: 0, dy: -12).contains(gridPoint) }) else {
-            return // 落在所有行之外:保持 gap 在最近位置,不跳动
+            return
         }
 
         let rowPoint = row.convert(gridPoint, from: grid)
-        // 可见槽位 = 排除 gap 自身与隐藏的源 cell;按中点决定插入槽位序号
         let visibleViews = row.arrangedSubviews.filter { !($0 is DropGapView) && !$0.isHidden }
         var slot = visibleViews.count
         for (index, view) in visibleViews.enumerated() where rowPoint.x < view.frame.midX {
@@ -489,7 +561,6 @@ final class LauncherContentView: NSView {
         }
 
         gapView.removeFromSuperview()
-        // 映射回 arrangedSubview 下标(隐藏源 cell 仍占着一个 arranged 位置)
         let visibleArrangedIndices = row.arrangedSubviews.indices.filter {
             !(row.arrangedSubviews[$0] is DropGapView) && !row.arrangedSubviews[$0].isHidden
         }
@@ -503,6 +574,8 @@ final class LauncherContentView: NSView {
     private func reorderEnded(_ identity: String, screenPoint: NSPoint) {
         guard reorderIdentity == identity else { return }
         reorderIdentity = nil
+        stopAutoScroll()
+        lastDragScreenPoint = nil
         let gap = gapView
         gapView = nil
 
@@ -513,7 +586,6 @@ final class LauncherContentView: NSView {
             return
         }
 
-        // 越界超过 24pt → 删除;面板 frame 与 24pt 环之间 → 误拖回弹;frame 内 → 落位排序
         let expanded = window.frame.insetBy(dx: -24, dy: -24)
         guard expanded.contains(screenPoint) else {
             gap?.removeFromSuperview()
@@ -527,15 +599,12 @@ final class LauncherContentView: NSView {
         let changed = AppConfig.reorder(orderedIdentities: newOrder)
         actionHandler?(.dragEnded)
         if changed {
-            // reload 由 controller 的 appsChanged 统一完成(含窗口尺寸动画)
             actionHandler?(.appsChanged)
         } else {
-            // 顺序未变:不 reload,直接恢复源 cell,避免闪烁
             cellsByIdentity[identity]?.isHidden = false
         }
     }
 
-    /// 按当前视觉排布(gap 所在处即源 cell 新位置)收集 identity 顺序。
     private func visualIdentityOrder(sourceIdentity: String, gap: DropGapView?) -> [String] {
         var result: [String] = []
         for row in rows {
@@ -545,9 +614,70 @@ final class LauncherContentView: NSView {
                 } else if let cell = view as? AppCellView, cell.identity != sourceIdentity {
                     result.append(cell.identity)
                 }
-                // 隐藏的源 cell:跳过,它的身份已由 gap 位置代表
             }
         }
         return result
+    }
+
+    // MARK: - 排序拖拽边缘自动滚动
+
+    private func autoScrollAmount(for screenPoint: NSPoint) -> CGFloat {
+        guard let scrollView, scrollView.hasVerticalScroller, let window else { return 0 }
+        let point = convert(window.convertPoint(fromScreen: screenPoint), from: nil)
+        guard scrollView.frame.contains(point) else { return 0 }
+        let edge: CGFloat = 28
+        let topDistance = scrollView.frame.maxY - point.y
+        let bottomDistance = point.y - scrollView.frame.minY
+        if topDistance >= 0, topDistance < edge {
+            return -max(2, (edge - topDistance) / edge * 10)
+        }
+        if bottomDistance >= 0, bottomDistance < edge {
+            return max(2, (edge - bottomDistance) / edge * 10)
+        }
+        return 0
+    }
+
+    private func updateAutoScroll() {
+        guard let point = lastDragScreenPoint, autoScrollAmount(for: point) != 0 else {
+            stopAutoScroll()
+            return
+        }
+        guard autoScrollTimer == nil else { return }
+        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            self?.autoScrollStep()
+        }
+        autoScrollTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func autoScrollStep() {
+        guard let identity = reorderIdentity,
+              let point = lastDragScreenPoint,
+              let scrollView,
+              let document = scrollView.documentView else {
+            stopAutoScroll()
+            return
+        }
+        let amount = autoScrollAmount(for: point)
+        guard amount != 0 else {
+            stopAutoScroll()
+            return
+        }
+        let clip = scrollView.contentView
+        let maximum = max(0, document.frame.height - clip.bounds.height)
+        let oldY = clip.bounds.origin.y
+        let newY = min(max(0, oldY + amount), maximum)
+        guard newY != oldY else {
+            stopAutoScroll()
+            return
+        }
+        clip.setBoundsOrigin(NSPoint(x: clip.bounds.origin.x, y: newY))
+        scrollView.reflectScrolledClipView(clip)
+        moveGap(identity, screenPoint: point)
+    }
+
+    private func stopAutoScroll() {
+        autoScrollTimer?.invalidate()
+        autoScrollTimer = nil
     }
 }

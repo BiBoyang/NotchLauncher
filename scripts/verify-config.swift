@@ -1,8 +1,8 @@
 // AppConfig 数据层断言:settings 容错/clamp、reorder 语义、默认值、apps 保留。
 //
 // 运行:
-//   swiftc Sources/NotchLauncher/AppConfig.swift scripts/verify-config.swift \
-//     -o /tmp/nl-verify-config && /tmp/nl-verify-config
+//   swiftc Sources/NotchLauncher/AppConfig.swift Sources/NotchLauncher/ConfigFileMonitor.swift \
+//     scripts/verify-config.swift -o /tmp/nl-verify-config && /tmp/nl-verify-config
 //
 // 通过 exit 0;任一断言失败 exit 1。全部操作在临时目录,不碰真实 apps.json。
 
@@ -114,6 +114,91 @@ enum VerifyConfig {
         if case .success(let file) = AppConfig.loadConfig() {
             check(file.apps.isEmpty, "删除后 apps 为空且设置结构仍可解析")
         } else { check(false, "删除后加载失败") }
+
+        // ---------- 7. 恢复默认:保留 apps 与登录项选择 ----------
+        _ = AppConfig.add(safari)
+        let custom = LauncherSettings(openDelay: 0.4, closeDelay: 0.8, iconsPerRow: 5, loginItemEnabled: false)
+        _ = AppConfig.saveSettings(custom)
+        check(AppConfig.resetInteractionSettings(), "恢复默认参数执行")
+        if case .success(let reset) = AppConfig.loadConfig() {
+            check(reset.apps.map(\.identity) == [safari.identity], "恢复默认保留 apps")
+            check(reset.settings?.resolvedOpenDelay == 0.15, "恢复默认展开延迟")
+            check(reset.settings?.resolvedCloseDelay == 0.35, "恢复默认收起延迟")
+            check(reset.settings?.resolvedIconsPerRow == 6, "恢复默认每行数量")
+            check(reset.settings?.loginItemEnabled == false, "恢复默认保留登录项选择")
+        } else { check(false, "恢复默认后加载失败") }
+        check(!AppConfig.resetInteractionSettings(), "重复恢复默认不写盘")
+
+        // ---------- 8. 导出 / 导入 / 备份 / 无效导入回退 ----------
+        let exportURL = tempDir.appendingPathComponent("export.json")
+        do {
+            try AppConfig.exportConfig(to: exportURL)
+            let exported = try JSONDecoder().decode(AppConfigFile.self, from: Data(contentsOf: exportURL))
+            check(exported.apps.map(\.identity) == [safari.identity], "导出完整当前配置")
+        } catch { check(false, "导出配置失败:\(error)") }
+
+        let importURL = tempDir.appendingPathComponent("import.json")
+        let importedJSON = #"{ "apps": [{"name":"备忘录","bundleID":"com.apple.Notes"},{"name":"音乐","bundleID":"com.apple.Music"}], "settings": {"openDelay":0.8,"loginItemEnabled":true} }"#
+        do {
+            try importedJSON.write(to: importURL, atomically: true, encoding: .utf8)
+            try AppConfig.importConfig(from: importURL)
+            if case .success(let imported) = AppConfig.loadConfig() {
+                check(imported.apps.count == 2, "导入替换应用列表")
+                check(imported.settings?.resolvedOpenDelay == 0.8, "导入设置生效")
+                check(imported.settings?.loginItemEnabled == true, "导入登录项偏好")
+            } else { check(false, "导入后加载失败") }
+            let backups = try FileManager.default.contentsOfDirectory(
+                at: AppConfig.backupsDirectoryURL,
+                includingPropertiesForKeys: nil
+            )
+            check(backups.count == 1, "导入前生成一份备份")
+            if let backup = backups.first {
+                let previous = try JSONDecoder().decode(AppConfigFile.self, from: Data(contentsOf: backup))
+                check(previous.apps.map(\.identity) == [safari.identity], "备份保留导入前配置")
+            }
+        } catch { check(false, "导入或备份失败:\(error)") }
+
+        let beforeInvalidImport = try? Data(contentsOf: AppConfig.fileURL)
+        let invalidURL = tempDir.appendingPathComponent("invalid.json")
+        try? "{ broken".write(to: invalidURL, atomically: true, encoding: .utf8)
+        do {
+            try AppConfig.importConfig(from: invalidURL)
+            check(false, "无效导入应被拒绝")
+        } catch {
+            check(true, "无效导入被拒绝")
+        }
+        check((try? Data(contentsOf: AppConfig.fileURL)) == beforeInvalidImport, "无效导入不修改现有配置")
+
+        // ---------- 9. 隐藏 / 恢复及可见项排序时保留隐藏位置 ----------
+        let hiddenFixture = #"{ "apps": [{"name":"Safari","bundleID":"com.apple.Safari"},{"name":"备忘录","bundleID":"com.apple.Notes"},{"name":"音乐","bundleID":"com.apple.Music"}] }"#
+        try? hiddenFixture.write(to: AppConfig.fileURL, atomically: true, encoding: .utf8)
+        check(AppConfig.setHidden(identity: notes.identity, hidden: true), "隐藏条目成功")
+        check(!AppConfig.setHidden(identity: notes.identity, hidden: true), "重复隐藏不写盘")
+        check(AppConfig.reorder(orderedIdentities: [music.identity, safari.identity]), "含隐藏条目时重排可见项")
+        if case .success(let hiddenOrder) = AppConfig.loadConfig() {
+            check(
+                hiddenOrder.apps.map(\.identity) == [music.identity, notes.identity, safari.identity],
+                "隐藏条目保留原位置且不丢数据"
+            )
+            check(hiddenOrder.apps[1].hidden == true, "排序后隐藏状态保留")
+        } else { check(false, "隐藏排序后加载失败") }
+        check(AppConfig.setHidden(identity: notes.identity, hidden: false), "恢复隐藏条目")
+
+        // ---------- 10. 文件监控:忽略内部写回,识别外部原子替换 ----------
+        let monitor = ConfigFileMonitor()
+        var externalChanges = 0
+        monitor.onChange = { externalChanges += 1 }
+        monitor.start()
+        let internalEntry = AppEntry(name: "内部", bundleID: "com.example.Internal", path: nil)
+        _ = AppConfig.add(internalEntry)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+        check(externalChanges == 0, "内部保存不会触发外部变更回调")
+
+        let external = #"{ "apps": [{"name":"外部","bundleID":"com.example.External"}], "settings": {"iconsPerRow":8} }"#
+        try? external.write(to: AppConfig.fileURL, atomically: true, encoding: .utf8)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.7))
+        check(externalChanges == 1, "外部原子替换触发一次回调")
+        monitor.stop()
 
         print(failures == 0 ? "\n===== 数据层验证:ALL PASS =====" : "\n===== 数据层验证:FAIL(\(failures)) =====")
         exit(failures == 0 ? 0 : 1)

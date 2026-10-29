@@ -4,6 +4,7 @@ struct AppEntry: Codable {
     var name: String?
     var bundleID: String?
     var path: String?
+    var hidden: Bool? = nil
 
     /// 条目身份:bundleID 优先,否则 path。去重与删除都按此匹配。
     var identity: String {
@@ -17,6 +18,8 @@ struct LauncherSettings: Codable, Equatable {
     var openDelay: Double?
     var closeDelay: Double?
     var iconsPerRow: Int?
+    /// nil 表示沿用首次启动自动注册的默认行为;false 表示用户明确关闭。
+    var loginItemEnabled: Bool?
 
     static let defaultOpenDelay: TimeInterval = 0.15
     static let defaultCloseDelay: TimeInterval = 0.35
@@ -26,10 +29,16 @@ struct LauncherSettings: Codable, Equatable {
     static let iconsPerRowRange: ClosedRange<Int> = 3...10
 
     /// 逐字段容错解码:任一字段类型错误只丢弃该字段,不拖垮整个 settings。
-    init(openDelay: Double? = nil, closeDelay: Double? = nil, iconsPerRow: Int? = nil) {
+    init(
+        openDelay: Double? = nil,
+        closeDelay: Double? = nil,
+        iconsPerRow: Int? = nil,
+        loginItemEnabled: Bool? = nil
+    ) {
         self.openDelay = openDelay
         self.closeDelay = closeDelay
         self.iconsPerRow = iconsPerRow
+        self.loginItemEnabled = loginItemEnabled
     }
 
     init(from decoder: Decoder) throws {
@@ -37,6 +46,7 @@ struct LauncherSettings: Codable, Equatable {
         openDelay = (try? c.decodeIfPresent(Double.self, forKey: .openDelay)) ?? nil
         closeDelay = (try? c.decodeIfPresent(Double.self, forKey: .closeDelay)) ?? nil
         iconsPerRow = (try? c.decodeIfPresent(Int.self, forKey: .iconsPerRow)) ?? nil
+        loginItemEnabled = (try? c.decodeIfPresent(Bool.self, forKey: .loginItemEnabled)) ?? nil
     }
 
     var resolvedOpenDelay: TimeInterval {
@@ -86,6 +96,7 @@ enum LauncherAction {
     case terminate(ResolvedApp, force: Bool)
     case reveal(ResolvedApp)
     case remove(identity: String)
+    case setHidden(identity: String, hidden: Bool)
     case dragBegan
     case dragEnded
     case appsChanged
@@ -100,6 +111,8 @@ enum LauncherAction {
 extension Notification.Name {
     /// 设置窗口写入新参数后广播;controller 收到后重读并重排。
     static let launcherSettingsDidChange = Notification.Name("dev.boyang.NotchLauncher.settingsDidChange")
+    /// 内部写入通知:仅供文件监控更新内容基准,避免把自己的写回误判为外部编辑。
+    static let launcherConfigDidWrite = Notification.Name("dev.boyang.NotchLauncher.configDidWrite")
 }
 
 enum AppConfig {
@@ -114,6 +127,10 @@ enum AppConfig {
 
     static var fileURL: URL {
         directoryURL.appendingPathComponent("apps.json")
+    }
+
+    static var backupsDirectoryURL: URL {
+        directoryURL.appendingPathComponent("Backups", isDirectory: true)
     }
 
     static func ensureExists() {
@@ -171,7 +188,7 @@ enum AppConfig {
         }
     }
 
-    /// 按 UI 落地的 identity 顺序全量重排;未出现在列表中的条目(理论上不应有)安全追加末尾。
+    /// 按 UI 落地的 identity 顺序重排;漏传的可见条目追加末尾,隐藏条目保留原位置。
     @discardableResult
     static func reorder(orderedIdentities: [String]) -> Bool {
         update { file in
@@ -185,12 +202,28 @@ enum AppConfig {
                     reordered.append(entry)
                 }
             }
-            for entry in file.apps where !seen.contains(entry.identity) {
+            for entry in file.apps where !seen.contains(entry.identity) && entry.hidden != true {
                 reordered.append(entry)
+                seen.insert(entry.identity)
+            }
+            // 隐藏条目不在当前 UI 排序列表中;按原下标插回,避免无意移到末尾。
+            for (index, entry) in file.apps.enumerated() where entry.hidden == true && !seen.contains(entry.identity) {
+                reordered.insert(entry, at: min(index, reordered.count))
+                seen.insert(entry.identity)
             }
 
             guard reordered.map(\.identity) != file.apps.map(\.identity) else { return false }
             file.apps = reordered
+            return true
+        }
+    }
+
+    @discardableResult
+    static func setHidden(identity: String, hidden: Bool) -> Bool {
+        update { file in
+            guard let index = file.apps.firstIndex(where: { $0.identity == identity }),
+                  (file.apps[index].hidden ?? false) != hidden else { return false }
+            file.apps[index].hidden = hidden
             return true
         }
     }
@@ -203,6 +236,49 @@ enum AppConfig {
             file.settings = settings
             return true
         }
+    }
+
+    /// 恢复延迟和网格默认值;保留 apps 与登录项选择。
+    @discardableResult
+    static func resetInteractionSettings() -> Bool {
+        update { file in
+            var reset = LauncherSettings()
+            reset.loginItemEnabled = file.settings?.loginItemEnabled
+            let current = file.settings ?? LauncherSettings()
+            guard current != reset else { return false }
+            file.settings = reset
+            return true
+        }
+    }
+
+    /// 导出原始配置,即使当前 JSON 已损坏也允许用户备份抢救。
+    static func exportConfig(to destination: URL) throws {
+        ensureExists()
+        let data = try Data(contentsOf: fileURL)
+        try data.write(to: destination, options: .atomic)
+    }
+
+    /// 先完整解码校验,再备份并原子替换;任一步失败都不会主动清除原配置。
+    static func importConfig(from source: URL) throws {
+        let data = try Data(contentsOf: source)
+        _ = try JSONDecoder().decode(AppConfigFile.self, from: data)
+        ensureExists()
+        _ = try backupCurrentConfig()
+        try data.write(to: fileURL, options: .atomic)
+        NotificationCenter.default.post(name: .launcherConfigDidWrite, object: nil)
+    }
+
+    @discardableResult
+    static func backupCurrentConfig() throws -> URL {
+        let fm = FileManager.default
+        try fm.createDirectory(at: backupsDirectoryURL, withIntermediateDirectories: true)
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        let name = "apps-\(formatter.string(from: Date()))-\(UUID().uuidString).json"
+        let destination = backupsDirectoryURL.appendingPathComponent(name)
+        try fm.copyItem(at: fileURL, to: destination)
+        return destination
     }
 
     /// 读取-变更-原子写回。返回是否发生了实际写盘:无变更不写盘且返回 false。
@@ -223,6 +299,7 @@ enum AppConfig {
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             let data = try encoder.encode(file)
             try data.write(to: fileURL, options: .atomic)
+            NotificationCenter.default.post(name: .launcherConfigDidWrite, object: nil)
             return true
         } catch {
             nlLog("配置写回失败:\(error.localizedDescription)")

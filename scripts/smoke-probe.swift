@@ -8,10 +8,11 @@ import Cocoa
 _ = NSApplication.shared
 
 let args = CommandLine.arguments
+let clampedHeight = args.count == 5 && args[4] == "clamped"
 guard args.count == 5,
     let pid = Int(args[1]),
     let expectedW = Double(args[3]),
-    let expectedH = Double(args[4])
+    clampedHeight || Double(args[4]) != nil
 else {
     print("usage: smoke-probe.swift <pid> <label> <expectedWidth> <expectedHeight>")
     exit(2)
@@ -43,6 +44,9 @@ else {
     exit(1)
 }
 let notchCenterX = screen.frame.origin.x + (left.maxX + right.minX) / 2
+let expectedH = clampedHeight
+    ? max(160, screen.frame.maxY - screen.visibleFrame.minY - 16)
+    : Double(args[4])!
 // CG 全局坐标原点在主屏左上,Y 轴与 Cocoa 相反
 let primaryHeight = NSScreen.screens[0].frame.maxY
 let warpTarget = CGPoint(x: notchCenterX, y: primaryHeight - (screen.frame.maxY - 5))

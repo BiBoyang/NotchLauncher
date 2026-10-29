@@ -31,6 +31,8 @@ final class NotchController: NSResponder {
     private var notchRect: NSRect = .zero
     private var screen: NSScreen?
     private var settingsWindow: SettingsWindowController?
+    private var configMonitor: ConfigFileMonitor?
+    private var pendingConfigReload = false
 
     private var openWorkItem: DispatchWorkItem?
     private var closeWorkItem: DispatchWorkItem?
@@ -55,6 +57,11 @@ final class NotchController: NSResponder {
         reloadSettings()
         rebuildWindow()
         installNotificationObservers()
+
+        let monitor = ConfigFileMonitor()
+        monitor.onChange = { [weak self] in self?.externalConfigDidChange() }
+        configMonitor = monitor
+        monitor.start()
     }
 
     func screenParametersChanged() {
@@ -99,7 +106,22 @@ final class NotchController: NSResponder {
 
     @objc private func settingsDidChange() {
         reloadSettings()
+        applyConfigurationChange()
+    }
+
+    private func externalConfigDidChange() {
+        reloadSettings()
+        applyConfigurationChange()
+        nlLog("配置外部变化:已重新加载")
+    }
+
+    private func applyConfigurationChange() {
         guard state == .open else { return }
+        if dragInProgress || contentView?.isReorderSessionActive == true {
+            pendingConfigReload = true
+            return
+        }
+        pendingConfigReload = false
         refreshApps()
     }
 
@@ -117,6 +139,7 @@ final class NotchController: NSResponder {
         closeWorkItem?.cancel()
         removeMonitors()
         dragInProgress = false
+        pendingConfigReload = false
 
         let oldWindow = window
         window = nil
@@ -189,6 +212,11 @@ final class NotchController: NSResponder {
             DispatchQueue.main.asyncAfter(deadline: .now() + openDelay, execute: item)
         } else {
             openWorkItem?.cancel()
+            if pendingConfigReload {
+                pendingConfigReload = false
+                reloadSettings()
+                refreshApps()
+            }
             guard state == .open, let window, !window.frame.contains(NSEvent.mouseLocation) else { return }
             let item = DispatchWorkItem { [weak self] in self?.closePanel() }
             closeWorkItem = item
@@ -202,7 +230,7 @@ final class NotchController: NSResponder {
         guard let window, let contentView, let screen, state == .closed else { return }
         state = .open
 
-        contentView.reloadApps(notchHeight: notchRect.height)
+        contentView.reloadApps(notchHeight: notchRect.height, maxContentHeight: maximumContentHeight())
         let size = contentView.desiredPanelSize(minimumWidth: notchRect.width + 140)
         let target = panelTargetRect(size: size, screen: screen)
 
@@ -233,6 +261,12 @@ final class NotchController: NSResponder {
         nlLog("closed")
     }
 
+    private func maximumContentHeight() -> CGFloat {
+        guard let screen else { return .greatestFiniteMagnitude }
+        let maximumPanelHeight = max(160, screen.frame.maxY - screen.visibleFrame.minY - 16)
+        return max(AppCellView.cellSize.height, maximumPanelHeight - notchRect.height - 28)
+    }
+
     private func panelTargetRect(size: CGSize, screen: NSScreen) -> NSRect {
         NSRect(
             x: notchRect.midX - size.width / 2,
@@ -245,7 +279,7 @@ final class NotchController: NSResponder {
     /// 配置内容变化后:重建图标列表;面板开着则同步调整窗口尺寸。
     private func refreshApps() {
         guard let contentView else { return }
-        contentView.reloadApps(notchHeight: notchRect.height)
+        contentView.reloadApps(notchHeight: notchRect.height, maxContentHeight: maximumContentHeight())
         guard let window, let screen, state == .open else { return }
         let size = contentView.desiredPanelSize(minimumWidth: notchRect.width + 140)
         NSAnimationContext.runAnimationGroup { context in
@@ -292,6 +326,11 @@ final class NotchController: NSResponder {
                 nlLog("删除条目:\(identity)")
             }
             refreshApps()
+        case .setHidden(let identity, let hidden):
+            if AppConfig.setHidden(identity: identity, hidden: hidden) {
+                nlLog("\(hidden ? "隐藏" : "恢复")条目:\(identity)")
+            }
+            refreshApps()
         case .dragBegan:
             setDragInProgress(true)
         case .dragEnded:
@@ -310,7 +349,7 @@ final class NotchController: NSResponder {
             closePanel()
         case .reload:
             reloadSettings()
-            contentView?.reloadApps(notchHeight: notchRect.height)
+            contentView?.reloadApps(notchHeight: notchRect.height, maxContentHeight: maximumContentHeight())
         case .quit:
             NSApp.terminate(nil)
         }

@@ -1,5 +1,4 @@
 import Cocoa
-import ServiceManagement
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var controller: NotchController?
@@ -23,28 +22,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller?.screenParametersChanged()
     }
 
-    /// 开机自启:仅当 bundle 位于 /Applications 或 ~/Applications 时注册 SMAppService 登录项;
-    /// 从开发目录运行时跳过,防止登录项指向会过期的开发构建。注册失败仅记日志,不影响启动。
+    /// 保留既有首次启动自动注册;用户在设置中明确关闭后不再重复注册。
     private func registerLoginItemIfNeeded() {
-        let bundlePath = Bundle.main.bundlePath
-        let userApplications = NSHomeDirectory() + "/Applications"
-        let installed = bundlePath.hasPrefix("/Applications/")
-            || bundlePath.hasPrefix(userApplications + "/")
-
-        guard installed else {
-            nlLog("LoginItem: skip, bundle not under /Applications or ~/Applications (\(bundlePath))")
+        if case .success(let file) = AppConfig.loadConfig(), file.settings?.loginItemEnabled == false {
+            nlLog("LoginItem: disabled by user preference, skip register")
             return
         }
-
-        let service = SMAppService.mainApp
-        if service.status == .enabled {
-            nlLog("LoginItem: already enabled, skip register")
-            return
-        }
-
         do {
-            try service.register()
-            nlLog("LoginItem: registered (\(bundlePath))")
+            try LoginItemManager.setEnabled(true)
+            nlLog("LoginItem: enabled=\(LoginItemManager.isEnabled), requiresApproval=\(LoginItemManager.requiresApproval)")
+        } catch LoginItemError.notInstalled {
+            nlLog("LoginItem: skip, development bundle (\(Bundle.main.bundlePath))")
         } catch {
             nlLog("LoginItem: register failed: \(error)")
         }

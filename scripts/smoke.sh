@@ -2,7 +2,8 @@
 # NotchLauncher 几何回归冒烟测试
 #
 # 一条命令完成:构建 debug 版 → 1-app 夹具断言面板 325×152 → 7-app 夹具断言 590×254
-# → 7-app + iconsPerRow=3 夹具断言 325×356 → 恢复 apps.json → 重启日常安装态实例。
+# → 7-app + iconsPerRow=3 夹具断言 325×356 → 100-app 断言窗口高度被可用区域钳制
+# → 恢复 apps.json → 重启日常安装态实例。
 # 全 PASS exit 0,任一 FAIL exit 1。
 #
 # 注意:运行期间鼠标会被 warp 移动几秒,请勿触碰鼠标;面板开合断言读系统窗口服务器的
@@ -44,6 +45,13 @@ FIXTURE_7_3ROWS='{"apps":[
 {"name":"信息","bundleID":"com.apple.MobileSMS"},
 {"name":"FaceTime","bundleID":"com.apple.FaceTime"}
 ],"settings":{"iconsPerRow":3}}'
+
+FIXTURE_100='{"apps":['
+for i in $(seq 1 100); do
+    [ "$i" -gt 1 ] && FIXTURE_100+=","
+    FIXTURE_100+="{\"name\":\"App $i\",\"bundleID\":\"com.example.NotchLauncherFixture$i\"}"
+done
+FIXTURE_100+=']}'
 
 FAIL=0
 note() { echo "[smoke] $*"; }
@@ -126,7 +134,7 @@ rm -f "$DEBUG_LOG"
 note "debug 实例已启动(pid=$DEBUG_PID)"
 
 # ---------- 4. 场景一:1 app → 325×152 ----------
-note "场景 1/2:1 app,断言面板 325×152(鼠标将被 warp,勿动)…"
+note "场景 1/4:1 app,断言面板 325×152(鼠标将被 warp,勿动)…"
 if swift "$ROOT/scripts/smoke-probe.swift" "$DEBUG_PID" "1-app" 325 152; then
     note "场景 1 PASS"
 else
@@ -137,7 +145,7 @@ fi
 # ---------- 5. 场景二:7 app → 590×254 ----------
 printf '%s' "$FIXTURE_7" > "$APPS_JSON"
 note "apps.json 已替换为 7-app 夹具"
-note "场景 2/3:7 app,断言面板 590×254(鼠标将被 warp,勿动)…"
+note "场景 2/4:7 app,断言面板 590×254(鼠标将被 warp,勿动)…"
 if swift "$ROOT/scripts/smoke-probe.swift" "$DEBUG_PID" "7-app" 590 254; then
     note "场景 2 PASS"
 else
@@ -148,11 +156,22 @@ fi
 # ---------- 5b. 场景三:7 app + iconsPerRow=3 → 325×356 ----------
 printf '%s' "$FIXTURE_7_3ROWS" > "$APPS_JSON"
 note "apps.json 已替换为 7-app/每行3个 夹具"
-note "场景 3/3:iconsPerRow=3,断言面板 325×356(鼠标将被 warp,勿动)…"
+note "场景 3/4:iconsPerRow=3,断言面板 325×356(鼠标将被 warp,勿动)…"
 if swift "$ROOT/scripts/smoke-probe.swift" "$DEBUG_PID" "7-app-3rows" 325 356; then
     note "场景 3 PASS"
 else
     note "场景 3 FAIL"
+    FAIL=1
+fi
+
+# ---------- 5c. 场景四:100 app → 高度不越过屏幕可用区域 ----------
+printf '%s' "$FIXTURE_100" > "$APPS_JSON"
+note "apps.json 已替换为 100-app 夹具"
+note "场景 4/4:100 app,断言面板宽度 590、高度按屏幕可用区域钳制(鼠标将被 warp,勿动)…"
+if swift "$ROOT/scripts/smoke-probe.swift" "$DEBUG_PID" "100-app-clamped" 590 clamped; then
+    note "场景 4 PASS"
+else
+    note "场景 4 FAIL"
     FAIL=1
 fi
 
